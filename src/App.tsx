@@ -3,14 +3,29 @@ import { auth, db, loginWithGoogle, logout } from './firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { collection, query, where, orderBy, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, getDoc } from 'firebase/firestore';
 import { GoogleGenAI, Modality } from '@google/genai';
-import { Bot, CheckSquare, Command, Settings, Send, Mic, LogOut, Loader2, Play } from 'lucide-react';
+import { Bot, CheckSquare, Command, Settings, Send, Mic, LogOut, Loader2, Play, Monitor, FileText, FolderOpen, Database, Search } from 'lucide-react';
+
+declare global {
+  interface Window {
+    electronAPI?: {
+      openFile: (path: string) => Promise<{success: boolean, error?: string}>;
+      openUrl: (url: string) => Promise<{success: boolean, error?: string}>;
+      moveFile: (source: string, dest: string) => Promise<{success: boolean, error?: string}>;
+      getLogs: () => Promise<any[]>;
+      showItemInFolder: (path: string) => Promise<{success: boolean, error?: string}>;
+      selectFolder: () => Promise<string | null>;
+      scanFolder: (path: string) => Promise<{success: boolean, count?: number, error?: string}>;
+      getScannedFiles: () => Promise<any[]>;
+    }
+  }
+}
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'desktop' | 'settings'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'desktop' | 'settings' | 'logs' | 'database'>('chat');
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -66,6 +81,8 @@ export default function App() {
           <NavItem icon={<Bot />} label="Chat" active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} />
           <NavItem icon={<CheckSquare />} label="Tasks" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
           <NavItem icon={<Command />} label="Desktop" active={activeTab === 'desktop'} onClick={() => setActiveTab('desktop')} />
+          <NavItem icon={<Database />} label="File Database" active={activeTab === 'database'} onClick={() => setActiveTab('database')} />
+          <NavItem icon={<FileText />} label="File Logs" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
           <NavItem icon={<Settings />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>
         
@@ -85,6 +102,8 @@ export default function App() {
         {activeTab === 'chat' && <ChatView user={user} />}
         {activeTab === 'tasks' && <TasksView user={user} />}
         {activeTab === 'desktop' && <DesktopView user={user} />}
+        {activeTab === 'database' && <FileDatabaseView user={user} />}
+        {activeTab === 'logs' && <FileLogsView user={user} />}
         {activeTab === 'settings' && <SettingsView user={user} />}
       </div>
     </div>
@@ -340,67 +359,161 @@ function TasksView({ user }: { user: User }) {
 function DesktopView({ user }: { user: User }) {
   const [commands, setCommands] = useState<any[]>([]);
   const [cmd, setCmd] = useState('');
+  const [destCmd, setDestCmd] = useState('');
   const [action, setAction] = useState('open_file');
+  const [confirmModal, setConfirmModal] = useState<{isOpen: boolean, source: string, dest: string} | null>(null);
+  const isDesktop = !!window.electronAPI;
 
   useEffect(() => {
+    if (isDesktop) return; // Don't sync from Firestore if running locally
     const q = query(collection(db, 'desktop_commands'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setCommands(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
     return () => unsubscribe();
-  }, [user.uid]);
+  }, [user.uid, isDesktop]);
 
-  const queueCommand = async () => {
+  const handleActionSubmit = () => {
     if (!cmd.trim()) return;
-    await addDoc(collection(db, 'desktop_commands'), {
-      command: cmd.trim(),
-      action: action,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      userId: user.uid
-    });
+    if (action === 'move_file' && isDesktop) {
+      if (!destCmd.trim()) return;
+      setConfirmModal({ isOpen: true, source: cmd.trim(), dest: destCmd.trim() });
+    } else {
+      queueCommand(cmd.trim(), action);
+    }
+  };
+
+  const confirmMove = async () => {
+    if (!confirmModal) return;
+    setConfirmModal(null);
+    const { source, dest } = confirmModal;
+    
+    const result = await window.electronAPI!.moveFile(source, dest);
+    setCommands([{
+      id: Date.now().toString(),
+      command: `Move: ${source} -> ${dest}`,
+      action: 'move_file',
+      status: result?.success ? 'executed' : 'failed',
+      createdAt: new Date().toISOString()
+    }, ...commands]);
+    setCmd('');
+    setDestCmd('');
+  };
+
+  const queueCommand = async (commandText: string, actionType: string) => {
+    if (isDesktop) {
+      let result;
+      if (actionType === 'open_file') {
+        result = await window.electronAPI!.openFile(commandText);
+      } else if (actionType === 'bookmark') {
+        result = await window.electronAPI!.openUrl(commandText);
+      }
+
+      setCommands([{
+        id: Date.now().toString(),
+        command: commandText,
+        action: actionType,
+        status: result?.success ? 'executed' : 'failed',
+        createdAt: new Date().toISOString()
+      }, ...commands]);
+
+    } else {
+      await addDoc(collection(db, 'desktop_commands'), {
+        command: commandText,
+        action: actionType,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        userId: user.uid
+      });
+    }
     setCmd('');
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
+      {confirmModal && confirmModal.isOpen && (
+        <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl max-w-md w-full shadow-2xl">
+            <h3 className="text-lg font-semibold mb-2 text-red-400">Permission Required</h3>
+            <p className="text-sm text-zinc-300 mb-4">
+              Are you sure you want to move/rename this file?
+            </p>
+            <div className="bg-zinc-950 p-3 rounded-lg text-xs font-mono text-zinc-400 mb-6 break-all">
+              <div className="mb-1"><span className="text-zinc-500">From:</span> {confirmModal.source}</div>
+              <div><span className="text-zinc-500">To:</span> {confirmModal.dest}</div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setConfirmModal(null)} className="px-4 py-2 rounded-xl text-sm font-medium hover:bg-zinc-800 transition-colors">Cancel</button>
+              <button onClick={confirmMove} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-medium transition-colors">Allow & Move</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="p-6 border-b border-zinc-800 bg-zinc-900/30">
         <h2 className="text-xl font-semibold">Desktop Commands</h2>
-        <p className="text-sm text-zinc-500">Queue commands for your local companion script</p>
+        <p className="text-sm text-zinc-500">Execute commands directly on your local machine</p>
       </div>
       <div className="p-6 max-w-4xl w-full mx-auto">
         
-        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 mb-8">
-          <h3 className="text-emerald-400 font-medium mb-2 flex items-center gap-2">
-            <Command className="w-4 h-4" /> How this works
-          </h3>
-          <p className="text-sm text-emerald-500/80 leading-relaxed">
-            Because this web app runs in a secure cloud sandbox, it cannot directly access your computer's files. 
-            To execute these commands, you need to run a small Python or Node.js script on your local machine that listens to this Firestore collection and executes the pending commands.
-          </p>
-        </div>
+        {isDesktop ? (
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 mb-8">
+            <h3 className="text-emerald-400 font-medium mb-2 flex items-center gap-2">
+              <Monitor className="w-4 h-4" /> Desktop Mode Active
+            </h3>
+            <p className="text-sm text-emerald-500/80 leading-relaxed">
+              You are running the native desktop app! Commands will execute instantly on your machine. No Python script required.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 mb-8">
+            <h3 className="text-blue-400 font-medium mb-2 flex items-center gap-2">
+              <Command className="w-4 h-4" /> Web Preview Mode
+            </h3>
+            <p className="text-sm text-blue-500/80 leading-relaxed">
+              You are currently in the web preview. To get the plug-and-play desktop app, download this project and run the Electron build.
+            </p>
+          </div>
+        )}
 
-        <div className="flex gap-2 mb-8">
-          <select 
-            value={action} 
-            onChange={(e) => setAction(e.target.value)}
-            className="bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50"
-          >
-            <option value="open_file">Open File</option>
-            <option value="bookmark">Open Bookmark</option>
-            <option value="run_script">Run Script</option>
-          </select>
-          <input
-            type="text"
-            value={cmd}
-            onChange={(e) => setCmd(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && queueCommand()}
-            placeholder="e.g., C:\Documents\report.pdf or https://github.com"
-            className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50"
-          />
-          <button onClick={queueCommand} className="bg-emerald-600 hover:bg-emerald-500 px-6 rounded-xl text-sm font-medium transition-colors">
-            Queue
-          </button>
+        <div className="flex flex-col gap-2 mb-8">
+          <div className="flex gap-2">
+            <select 
+              value={action} 
+              onChange={(e) => setAction(e.target.value)}
+              className="bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50"
+            >
+              <option value="open_file">Open File</option>
+              <option value="bookmark">Open Bookmark</option>
+              {isDesktop && <option value="move_file">Move/Rename File</option>}
+              <option value="run_script">Run Script</option>
+            </select>
+            <input
+              type="text"
+              value={cmd}
+              onChange={(e) => setCmd(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleActionSubmit()}
+              placeholder={action === 'move_file' ? "Source file path..." : "e.g., C:\\Documents\\report.pdf or https://github.com"}
+              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50"
+            />
+            <button onClick={handleActionSubmit} className="bg-emerald-600 hover:bg-emerald-500 px-6 rounded-xl text-sm font-medium transition-colors">
+              Queue
+            </button>
+          </div>
+          {action === 'move_file' && isDesktop && (
+            <div className="flex gap-2">
+              <div className="w-[140px]"></div>
+              <input
+                type="text"
+                value={destCmd}
+                onChange={(e) => setDestCmd(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleActionSubmit()}
+                placeholder="Destination file path..."
+                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50"
+              />
+              <div className="w-[88px]"></div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-3">
@@ -492,17 +605,266 @@ function SettingsView({ user }: { user: User }) {
         <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-2xl p-6">
           <h3 className="text-lg font-medium mb-4">Server Configuration</h3>
           <p className="text-sm text-zinc-400 mb-4">
-            The Telegram bot runs on the backend server. To enable it, you must add your <code>TELEGRAM_BOT_TOKEN</code> to the environment variables in AI Studio.
+            The Telegram bot runs natively inside the Desktop App. To enable it, you must add your <code>TELEGRAM_BOT_TOKEN</code> to your local <code>.env</code> file.
           </p>
           <ol className="list-decimal list-inside text-sm text-zinc-500 space-y-2">
             <li>Go to Telegram and search for <strong>BotFather</strong></li>
             <li>Create a new bot and copy the API Token</li>
-            <li>Open the Secrets panel in AI Studio</li>
-            <li>Add a new secret named <code>TELEGRAM_BOT_TOKEN</code> with your token</li>
-            <li>Restart the dev server</li>
+            <li>Open the <code>.env</code> file in your downloaded project folder</li>
+            <li>Add <code>TELEGRAM_BOT_TOKEN=your_token_here</code></li>
+            <li>Restart the desktop app</li>
           </ol>
         </div>
 
+      </div>
+    </div>
+  );
+}
+
+function FileLogsView({ user }: { user: User }) {
+  const [logs, setLogs] = useState<any[]>([]);
+  const isDesktop = !!window.electronAPI;
+
+  useEffect(() => {
+    if (isDesktop) {
+      window.electronAPI!.getLogs().then(setLogs);
+    }
+  }, [isDesktop]);
+
+  const handleOpenFile = async (path: string) => {
+    if (isDesktop) {
+      await window.electronAPI!.openFile(path);
+      window.electronAPI!.getLogs().then(setLogs);
+    }
+  };
+
+  const handleOpenFolder = async (path: string) => {
+    if (isDesktop) {
+      await window.electronAPI!.showItemInFolder(path);
+    }
+  };
+
+  if (!isDesktop) {
+    return (
+      <div className="flex flex-col h-full items-center justify-center p-6 text-center">
+        <FileText className="w-12 h-12 text-zinc-700 mb-4" />
+        <h2 className="text-xl font-semibold mb-2">Desktop Only Feature</h2>
+        <p className="text-zinc-500 max-w-md">File logging and management is only available when running the native Electron desktop application.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="p-6 border-b border-zinc-800 bg-zinc-900/30 flex justify-between items-center">
+        <div>
+          <h2 className="text-xl font-semibold">File Operations Log</h2>
+          <p className="text-sm text-zinc-500">History of files accessed, scanned, and modified</p>
+        </div>
+        <button onClick={() => window.electronAPI!.getLogs().then(setLogs)} className="text-sm bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-lg transition-colors">
+          Refresh
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="max-w-5xl mx-auto space-y-3">
+          {logs.map((log, i) => (
+            <div key={i} className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-4 flex items-center justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-3 mb-1">
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                    log.action === 'MOVE' ? 'bg-purple-500/10 text-purple-400' : 
+                    log.action === 'SCAN_FOLDER' ? 'bg-amber-500/10 text-amber-400' :
+                    'bg-blue-500/10 text-blue-400'
+                  }`}>
+                    {log.action}
+                  </span>
+                  <span className={`text-xs ${log.status === 'SUCCESS' ? 'text-emerald-500' : 'text-red-500'}`}>
+                    {log.status}
+                  </span>
+                  <span className="text-xs text-zinc-500">{new Date(log.timestamp).toLocaleString()}</span>
+                </div>
+                <div className="text-sm text-zinc-300 truncate font-mono" title={log.source}>
+                  {log.source}
+                </div>
+                {log.destination && (
+                  <div className="text-sm text-zinc-400 truncate font-mono mt-1" title={log.destination}>
+                    <span className="text-zinc-600">→</span> {log.destination}
+                  </div>
+                )}
+                {log.details && (
+                  <div className="text-xs text-amber-400 mt-1">{log.details}</div>
+                )}
+                {log.error && (
+                  <div className="text-xs text-red-400 mt-1">{log.error}</div>
+                )}
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <button 
+                  onClick={() => handleOpenFolder(log.destination || log.source)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-medium transition-colors"
+                  title="Show in Folder"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" /> Folder
+                </button>
+                {log.action !== 'SCAN_FOLDER' && (
+                  <button 
+                    onClick={() => handleOpenFile(log.destination || log.source)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 rounded-lg text-xs font-medium transition-colors"
+                    title="Open File"
+                  >
+                    <FileText className="w-3.5 h-3.5" /> Open
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          {logs.length === 0 && (
+            <div className="text-center text-zinc-500 py-10">No file operations logged yet.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FileDatabaseView({ user }: { user: User }) {
+  const [files, setFiles] = useState<any[]>([]);
+  const [isScanning, setIsScanning] = useState(false);
+  const [search, setSearch] = useState('');
+  const isDesktop = !!window.electronAPI;
+
+  const loadFiles = async () => {
+    if (isDesktop) {
+      const data = await window.electronAPI!.getScannedFiles();
+      setFiles(data);
+    }
+  };
+
+  useEffect(() => {
+    loadFiles();
+  }, [isDesktop]);
+
+  const handleScan = async () => {
+    if (!isDesktop) return;
+    const folder = await window.electronAPI!.selectFolder();
+    if (!folder) return;
+
+    setIsScanning(true);
+    const result = await window.electronAPI!.scanFolder(folder);
+    setIsScanning(false);
+
+    if (result.success) {
+      loadFiles();
+    } else {
+      alert('Scan failed: ' + result.error);
+    }
+  };
+
+  const handleOpenFile = async (path: string) => {
+    if (isDesktop) {
+      await window.electronAPI!.openFile(path);
+    }
+  };
+
+  const handleOpenFolder = async (path: string) => {
+    if (isDesktop) {
+      await window.electronAPI!.showItemInFolder(path);
+    }
+  };
+
+  if (!isDesktop) {
+    return (
+      <div className="flex flex-col h-full items-center justify-center p-6 text-center">
+        <Database className="w-12 h-12 text-zinc-700 mb-4" />
+        <h2 className="text-xl font-semibold mb-2">Desktop Only Feature</h2>
+        <p className="text-zinc-500 max-w-md">The local file database is only available when running the native Electron desktop application.</p>
+      </div>
+    );
+  }
+
+  const filteredFiles = files.filter(f => 
+    f.name.toLowerCase().includes(search.toLowerCase()) || 
+    f.path.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="p-6 border-b border-zinc-800 bg-zinc-900/30 flex justify-between items-center">
+        <div>
+          <h2 className="text-xl font-semibold">Local File Database</h2>
+          <p className="text-sm text-zinc-500">Scan folders to index and search your local files</p>
+        </div>
+        <button 
+          onClick={handleScan} 
+          disabled={isScanning}
+          className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2"
+        >
+          {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
+          {isScanning ? 'Scanning...' : 'Scan New Folder'}
+        </button>
+      </div>
+      
+      <div className="p-6 border-b border-zinc-800/50 bg-zinc-900/10">
+        <div className="relative max-w-2xl">
+          <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search indexed files by name or path..."
+            className="w-full bg-zinc-900 border border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50"
+          />
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-xs font-medium text-zinc-500 mb-4 uppercase tracking-wider">
+            {filteredFiles.length} Indexed Files
+          </div>
+          
+          <div className="space-y-2">
+            {filteredFiles.map((file, i) => (
+              <div key={i} className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-3 flex items-center justify-between gap-4 hover:bg-zinc-800/50 transition-colors">
+                <div className="flex-1 min-w-0 flex items-center gap-3">
+                  <FileText className="w-5 h-5 text-zinc-500 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-zinc-200 truncate">{file.name}</div>
+                    <div className="text-xs text-zinc-500 truncate font-mono mt-0.5" title={file.path}>{file.path}</div>
+                  </div>
+                </div>
+                
+                <div className="flex items-center gap-6 shrink-0">
+                  <div className="text-xs text-zinc-500 hidden md:block">
+                    {(file.size / 1024 / 1024).toFixed(2)} MB
+                  </div>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => handleOpenFolder(file.path)}
+                      className="p-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
+                      title="Show in Folder"
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => handleOpenFile(file.path)}
+                      className="p-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 rounded-lg transition-colors"
+                      title="Open File"
+                    >
+                      <Play className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+            
+            {filteredFiles.length === 0 && (
+              <div className="text-center text-zinc-500 py-10">
+                {search ? 'No files match your search.' : 'No files indexed yet. Click "Scan New Folder" to begin.'}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
