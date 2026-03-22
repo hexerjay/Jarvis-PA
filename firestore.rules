@@ -85,21 +85,25 @@ service cloud.firestore {
 
     // Domain Validators
     function isValidUser(data) {
-      return data.keys().hasOnly(['uid', 'email', 'name', 'role', 'telegramChatId']) &&
+      return data.keys().hasOnly(['uid', 'email', 'name', 'role', 'telegramChatId', 'whatsappToken', 'slackToken']) &&
              data.uid is string && data.uid.size() > 0 &&
              data.email is string && isValidEmail(data.email) &&
              data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
              data.role in ['admin', 'user'] &&
-             (!('telegramChatId' in data) || data.telegramChatId is number);
+             (!('telegramChatId' in data) || data.telegramChatId == null || data.telegramChatId is number) &&
+             (!('whatsappToken' in data) || data.whatsappToken == null || (data.whatsappToken is string && data.whatsappToken.size() < 500)) &&
+             (!('slackToken' in data) || data.slackToken == null || (data.slackToken is string && data.slackToken.size() < 500));
     }
 
     function isValidMessage(data) {
-      return data.keys().hasOnly(['text', 'sender', 'source', 'timestamp', 'userId']) &&
+      return data.keys().hasOnly(['text', 'sender', 'source', 'timestamp', 'userId', 'hasAttachment', 'attachmentName']) &&
              data.text is string && data.text.size() > 0 && data.text.size() < 10000 &&
              data.sender in ['user', 'assistant'] &&
              data.source in ['web', 'telegram'] &&
              isValidDateString(data.timestamp) &&
-             data.userId is string && data.userId.size() > 0;
+             data.userId is string && data.userId.size() > 0 &&
+             (!('hasAttachment' in data) || data.hasAttachment is bool) &&
+             (!('attachmentName' in data) || data.attachmentName == null || (data.attachmentName is string && data.attachmentName.size() < 500));
     }
 
     function isValidTask(data) {
@@ -123,7 +127,7 @@ service cloud.firestore {
     function isValidDesktopCommand(data) {
       return data.keys().hasOnly(['command', 'action', 'status', 'result', 'createdAt', 'userId']) &&
              data.command is string && data.command.size() > 0 && data.command.size() < 1000 &&
-             data.action in ['open_file', 'search_file', 'open_bookmark', 'add_bookmark', 'run_script'] &&
+             data.action in ['open_file', 'search_file', 'open_bookmark', 'add_bookmark', 'run_script', 'bookmark', 'move_file'] &&
              data.status in ['pending', 'executed', 'failed'] &&
              (!('result' in data) || (data.result is string && data.result.size() < 5000)) &&
              isValidDateString(data.createdAt) &&

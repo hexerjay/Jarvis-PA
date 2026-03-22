@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, session } = require('electron');
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const { GoogleGenAI } = require('@google/genai');
@@ -16,6 +16,22 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
     },
+  });
+
+  // Handle permissions
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+    } else {
+      callback(true); // Allow other permissions for local app
+    }
+  });
+
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (permission === 'media') {
+      return true;
+    }
+    return true; // Allow other permissions for local app
   });
 
   // In development, load the Vite dev server
@@ -49,6 +65,20 @@ app.on('window-all-closed', function () {
 const fs = require('fs').promises;
 const logFilePath = path.join(app.getPath('userData'), 'file_operations_log.json');
 const dbFilePath = path.join(app.getPath('userData'), 'scanned_files_db.json');
+const permissionsFilePath = path.join(app.getPath('userData'), 'folder_permissions.json');
+
+async function getPermissions() {
+  try {
+    const data = await fs.readFile(permissionsFilePath, 'utf8');
+    return JSON.parse(data);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function savePermissions(perms) {
+  await fs.writeFile(permissionsFilePath, JSON.stringify(perms, null, 2));
+}
 
 async function writeLog(entry) {
   try {
@@ -121,10 +151,57 @@ ipcMain.handle('desktop:scan-folder', async (event, folderPath) => {
     db = Array.from(existingPaths.values());
 
     await fs.writeFile(dbFilePath, JSON.stringify(db, null, 2));
+
+    // Update permissions
+    const perms = await getPermissions();
+    if (!perms.find(p => p.path === folderPath)) {
+      perms.push({ path: folderPath, grantedAt: new Date().toISOString() });
+      await savePermissions(perms);
+    }
+
     await writeLog({ action: 'SCAN_FOLDER', source: folderPath, status: 'SUCCESS', details: `Indexed ${files.length} files` });
     return { success: true, count: files.length };
   } catch (error) {
     await writeLog({ action: 'SCAN_FOLDER', source: folderPath, status: 'FAILED', error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('desktop:get-permissions', async () => {
+  return await getPermissions();
+});
+
+ipcMain.handle('desktop:remove-permission', async (event, folderPath) => {
+  const perms = await getPermissions();
+  const newPerms = perms.filter(p => p.path !== folderPath);
+  await savePermissions(newPerms);
+  
+  // Also remove from DB
+  try {
+    let db = [];
+    try {
+      const data = await fs.readFile(dbFilePath, 'utf8');
+      db = JSON.parse(data);
+    } catch (e) {}
+    db = db.filter(f => !f.path.startsWith(folderPath));
+    await fs.writeFile(dbFilePath, JSON.stringify(db, null, 2));
+  } catch(e) {}
+
+  await writeLog({ action: 'REMOVE_PERMISSION', source: folderPath, status: 'SUCCESS' });
+  return { success: true };
+});
+
+ipcMain.handle('desktop:save-file', async (event, { name, data, folder }) => {
+  try {
+    // data is base64 string
+    const buffer = Buffer.from(data, 'base64');
+    const targetFolder = folder || app.getPath('downloads');
+    const targetPath = path.join(targetFolder, name);
+    await fs.writeFile(targetPath, buffer);
+    await writeLog({ action: 'SAVE_FILE', source: 'Chat', destination: targetPath, status: 'SUCCESS' });
+    return { success: true, path: targetPath };
+  } catch (error) {
+    await writeLog({ action: 'SAVE_FILE', source: 'Chat', destination: name, status: 'FAILED', error: error.message });
     return { success: false, error: error.message };
   }
 });

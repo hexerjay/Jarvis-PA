@@ -9,7 +9,9 @@
         "email": { "type": "string", "format": "email" },
         "name": { "type": "string" },
         "role": { "type": "string", "enum": ["admin", "user"] },
-        "telegramChatId": { "type": "number", "description": "Linked Telegram Chat ID" }
+        "telegramChatId": { "type": "number", "description": "Linked Telegram Chat ID" },
+        "whatsappToken": { "type": "string", "description": "WhatsApp API Token" },
+        "slackToken": { "type": "string", "description": "Slack Bot Token" }
       },
       "required": ["uid", "email", "name", "role"]
     },
@@ -22,7 +24,9 @@
         "sender": { "type": "string", "enum": ["user", "assistant"] },
         "source": { "type": "string", "enum": ["web", "telegram"] },
         "timestamp": { "type": "string", "format": "date-time" },
-        "userId": { "type": "string" }
+        "userId": { "type": "string" },
+        "hasAttachment": { "type": "boolean" },
+        "attachmentName": { "type": "string" }
       },
       "required": ["text", "sender", "source", "timestamp", "userId"]
     },
@@ -58,7 +62,7 @@
       "type": "object",
       "properties": {
         "command": { "type": "string" },
-        "action": { "type": "string", "enum": ["open_file", "search_file", "open_bookmark", "add_bookmark", "run_script"] },
+        "action": { "type": "string", "enum": ["open_file", "search_file", "open_bookmark", "add_bookmark", "run_script", "bookmark", "move_file"] },
         "status": { "type": "string", "enum": ["pending", "executed", "failed"] },
         "result": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },

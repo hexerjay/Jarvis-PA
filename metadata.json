@@ -1,5 +1,5 @@
 {
   "name": "Executive Assistant",
   "description": "A personal AI assistant connected to Telegram with desktop command capabilities.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["microphone"]
 }

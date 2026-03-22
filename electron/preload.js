@@ -9,4 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectFolder: () => ipcRenderer.invoke('desktop:select-folder'),
   scanFolder: (folderPath) => ipcRenderer.invoke('desktop:scan-folder', folderPath),
   getScannedFiles: () => ipcRenderer.invoke('desktop:get-scanned-files'),
+  getPermissions: () => ipcRenderer.invoke('desktop:get-permissions'),
+  removePermission: (folderPath) => ipcRenderer.invoke('desktop:remove-permission', folderPath),
+  saveFile: (name, data, folder) => ipcRenderer.invoke('desktop:save-file', { name, data, folder }),
 });
