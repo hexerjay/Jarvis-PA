@@ -1,0 +1,169 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required) - Firebase Auth UID
+    //   - email: string (required) - User email
+    //   - name: string (required) - User name
+    //   - role: string (required, 'admin'|'user') - User role
+    //   - telegramChatId: number (optional) - Linked Telegram Chat ID
+    //
+    // Collection: messages
+    // Document ID: {messageId}
+    // Fields:
+    //   - text: string (required) - Message content
+    //   - sender: string (required, 'user'|'assistant') - Who sent it
+    //   - source: string (required, 'web'|'telegram') - Where it came from
+    //   - timestamp: string (required) - ISO 8601 date string
+    //   - userId: string (required) - Owner UID
+    //
+    // Collection: tasks
+    // Document ID: {taskId}
+    // Fields:
+    //   - title: string (required) - Task title
+    //   - status: string (required, 'pending'|'completed') - Task status
+    //   - createdAt: string (required) - ISO 8601 date string
+    //   - userId: string (required) - Owner UID
+    //
+    // Collection: desktop_commands
+    // Document ID: {commandId}
+    // Fields:
+    //   - command: string (required) - Command to execute
+    //   - action: string (required) - Action type (e.g., 'open_file', 'bookmark')
+    //   - status: string (required, 'pending'|'executed'|'failed') - Execution status
+    //   - result: string (optional) - Execution output
+    //   - createdAt: string (required) - ISO 8601 date string
+    //   - userId: string (required) - Owner UID
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+    
+    function uidUnchanged() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid;
+    }
+    
+    function uidNotModified() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == resource.data.userId;
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+    
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "burhanzafar9@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    // Domain Validators
+    function isValidUser(data) {
+      return data.keys().hasOnly(['uid', 'email', 'name', 'role', 'telegramChatId']) &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.email is string && isValidEmail(data.email) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.role in ['admin', 'user'] &&
+             (!('telegramChatId' in data) || data.telegramChatId is number);
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasOnly(['text', 'sender', 'source', 'timestamp', 'userId']) &&
+             data.text is string && data.text.size() > 0 && data.text.size() < 10000 &&
+             data.sender in ['user', 'assistant'] &&
+             data.source in ['web', 'telegram'] &&
+             isValidDateString(data.timestamp) &&
+             data.userId is string && data.userId.size() > 0;
+    }
+
+    function isValidTask(data) {
+      return data.keys().hasAll(['title', 'status', 'createdAt', 'userId']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 500 &&
+             data.status in ['pending', 'completed'] &&
+             isValidDateString(data.createdAt) &&
+             (!('dueDate' in data) || isValidDateString(data.dueDate)) &&
+             data.userId is string && data.userId.size() > 0;
+    }
+
+    function isValidAppointment(data) {
+      return data.keys().hasOnly(['title', 'startTime', 'endTime', 'createdAt', 'userId']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 500 &&
+             isValidDateString(data.startTime) &&
+             isValidDateString(data.endTime) &&
+             isValidDateString(data.createdAt) &&
+             data.userId is string && data.userId.size() > 0;
+    }
+
+    function isValidDesktopCommand(data) {
+      return data.keys().hasOnly(['command', 'action', 'status', 'result', 'createdAt', 'userId']) &&
+             data.command is string && data.command.size() > 0 && data.command.size() < 1000 &&
+             data.action in ['open_file', 'search_file', 'open_bookmark', 'add_bookmark', 'run_script'] &&
+             data.status in ['pending', 'executed', 'failed'] &&
+             (!('result' in data) || (data.result is string && data.result.size() < 5000)) &&
+             isValidDateString(data.createdAt) &&
+             data.userId is string && data.userId.size() > 0;
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && ((isOwner(userId) && request.resource.data.role == 'user') || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && ((isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /messages/{messageId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && isValidMessage(request.resource.data) && (uidUnchanged() || isAdmin());
+      allow update: if isAuthenticated() && isValidMessage(request.resource.data) && (uidNotModified() || isAdmin());
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && isValidTask(request.resource.data) && (uidUnchanged() || isAdmin());
+      allow update: if isAuthenticated() && isValidTask(request.resource.data) && (uidNotModified() || isAdmin());
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /appointments/{appointmentId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && isValidAppointment(request.resource.data) && (uidUnchanged() || isAdmin());
+      allow update: if isAuthenticated() && isValidAppointment(request.resource.data) && (uidNotModified() || isAdmin());
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /desktop_commands/{commandId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && isValidDesktopCommand(request.resource.data) && (uidUnchanged() || isAdmin());
+      allow update: if isAuthenticated() && isValidDesktopCommand(request.resource.data) && (uidNotModified() || isAdmin());
+      allow delete: if isDocOwner() || isAdmin();
+    }
+  }
+}
