@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog, session } = require('electro
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const { GoogleGenAI } = require('@google/genai');
+const { ingestFile, searchMemory } = require('./rag');
 require('dotenv').config();
 
 let mainWindow;
@@ -251,6 +252,62 @@ ipcMain.handle('desktop:move-file', async (event, source, destination) => {
     return { success: true };
   } catch (error) {
     await writeLog({ action: 'MOVE', source, destination, status: 'FAILED', error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('desktop:copy-file', async (event, source, destination) => {
+  try {
+    await fs.copyFile(source, destination);
+    await writeLog({ action: 'COPY', source, destination, status: 'SUCCESS' });
+    return { success: true };
+  } catch (error) {
+    await writeLog({ action: 'COPY', source, destination, status: 'FAILED', error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('desktop:delete-file', async (event, filePath) => {
+  try {
+    await fs.unlink(filePath);
+    await writeLog({ action: 'DELETE', source: filePath, status: 'SUCCESS' });
+    return { success: true };
+  } catch (error) {
+    await writeLog({ action: 'DELETE', source: filePath, status: 'FAILED', error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('desktop:ingest-folder', async (event, folderPath) => {
+  try {
+    const files = await walkDir(folderPath);
+    const dbPath = path.join(app.getPath('userData'), 'vector_db.json');
+    let totalChunks = 0;
+    
+    for (const file of files) {
+      if (['.pdf', '.docx', '.xlsx', '.xls', '.txt', '.md', '.csv', '.json', '.js', '.ts', '.py', '.html', '.css'].includes(file.extension)) {
+        try {
+          const chunksAdded = await ingestFile(file.path, dbPath);
+          totalChunks += chunksAdded;
+        } catch (e) {
+          console.error(`Failed to ingest ${file.path}:`, e);
+        }
+      }
+    }
+    await writeLog({ action: 'INGEST_MEMORY', source: folderPath, status: 'SUCCESS', details: `Ingested ${totalChunks} chunks` });
+    return { success: true, chunks: totalChunks };
+  } catch (error) {
+    await writeLog({ action: 'INGEST_MEMORY', source: folderPath, status: 'FAILED', error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('desktop:search-memory', async (event, query) => {
+  try {
+    const dbPath = path.join(app.getPath('userData'), 'vector_db.json');
+    const results = await searchMemory(query, dbPath, 5);
+    return { success: true, results };
+  } catch (error) {
     return { success: false, error: error.message };
   }
 });

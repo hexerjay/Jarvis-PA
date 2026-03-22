@@ -1,9 +1,16 @@
 import React, { useState, useEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
-import { auth, db, loginWithGoogle, logout } from './firebase';
+import { auth, db, loginWithGoogle, logout, loginAnonymously, loginWithEmail, registerWithEmail } from './firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { collection, query, where, orderBy, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, orderBy, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, getDoc, setDoc } from 'firebase/firestore';
 import { GoogleGenAI, Modality, Type, FunctionDeclaration } from '@google/genai';
-import { Bot, CheckSquare, Command, Settings, Send, Mic, LogOut, Loader2, Play, Monitor, FileText, FolderOpen, Database, Search, Shield, Link, Paperclip, StopCircle } from 'lucide-react';
+import { Bot, CheckSquare, Command, Settings, Send, Mic, LogOut, Loader2, Play, Monitor, FileText, FolderOpen, Database, Search, Shield, Link, Paperclip, StopCircle, Brain } from 'lucide-react';
+import * as pdfjsLib from 'pdfjs-dist';
+import * as mammoth from 'mammoth';
+import * as xlsx from 'xlsx';
+
+// Use the local worker from pdfjs-dist via Vite's ?url import
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 enum OperationType {
   CREATE = 'create',
@@ -127,6 +134,10 @@ declare global {
       getPermissions: () => Promise<any[]>;
       removePermission: (path: string) => Promise<{success: boolean}>;
       saveFile: (name: string, data: string, folder?: string) => Promise<{success: boolean, path?: string, error?: string}>;
+      ingestFolder: (path: string) => Promise<{success: boolean, chunks?: number, error?: string}>;
+      searchMemory: (query: string) => Promise<{success: boolean, results?: any[], error?: string}>;
+      copyFile: (source: string, dest: string) => Promise<{success: boolean, error?: string}>;
+      deleteFile: (path: string) => Promise<{success: boolean, error?: string}>;
     }
   }
 }
@@ -136,7 +147,12 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 function AppContent() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'desktop' | 'settings' | 'logs' | 'database' | 'admin' | 'integrations'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'desktop' | 'settings' | 'logs' | 'database' | 'admin' | 'integrations' | 'skills'>('chat');
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [loginError, setLoginError] = useState('');
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -145,6 +161,29 @@ function AppContent() {
     });
     return () => unsubscribe();
   }, []);
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    try {
+      if (isRegistering) {
+        await registerWithEmail(email, password, email.split('@')[0]);
+      } else {
+        await loginWithEmail(email, password);
+      }
+    } catch (err: any) {
+      setLoginError(err.message || 'Authentication failed');
+    }
+  };
+
+  const handleAnonymousAuth = async () => {
+    setLoginError('');
+    try {
+      await loginAnonymously();
+    } catch (err: any) {
+      setLoginError(err.message || 'Anonymous login failed');
+    }
+  };
 
   if (loading) {
     return (
@@ -162,13 +201,78 @@ function AppContent() {
             <Bot className="w-8 h-8" />
           </div>
           <h1 className="text-2xl font-semibold mb-2">Executive Assistant</h1>
-          <p className="text-slate-400 mb-8">Sign in to access your personal AI assistant, manage tasks, and connect your desktop.</p>
-          <button
-            onClick={loginWithGoogle}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-3 px-4 rounded-xl transition-colors"
-          >
-            Sign in with Google
-          </button>
+          <p className="text-slate-400 mb-6">Sign in to access your personal AI assistant, manage tasks, and connect your desktop.</p>
+          
+          {loginError && (
+            <div className="bg-red-500/10 border border-red-500/50 text-red-400 text-sm p-3 rounded-lg mb-4 text-left">
+              {loginError}
+              <p className="mt-1 text-xs opacity-80">
+                Note: If you are using Email/Password or Anonymous login, make sure you have enabled them in your Firebase Console Authentication settings.
+              </p>
+            </div>
+          )}
+
+          <form onSubmit={handleEmailAuth} className="space-y-3 mb-6">
+            <input
+              type="email"
+              placeholder="Email address"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500/50"
+              required
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500/50"
+              required
+            />
+            <button
+              type="submit"
+              className="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-3 px-4 rounded-xl transition-colors"
+            >
+              {isRegistering ? 'Create Account' : 'Sign In with Email'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsRegistering(!isRegistering)}
+              className="text-sm text-slate-400 hover:text-white transition-colors"
+            >
+              {isRegistering ? 'Already have an account? Sign in' : "Don't have an account? Register"}
+            </button>
+          </form>
+
+          <div className="relative mb-6">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-slate-800"></div>
+            </div>
+            <div className="relative flex justify-center text-sm">
+              <span className="px-2 bg-slate-900 text-slate-500">Or continue with</span>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <button
+              onClick={loginWithGoogle}
+              className="w-full bg-white hover:bg-slate-100 text-slate-900 font-medium py-3 px-4 rounded-xl transition-colors flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+              </svg>
+              Google
+            </button>
+            <button
+              onClick={handleAnonymousAuth}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-3 px-4 rounded-xl transition-colors"
+            >
+              Continue as Guest
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -195,6 +299,7 @@ function AppContent() {
           <NavItem icon={<Database />} label="File Database" active={activeTab === 'database'} onClick={() => setActiveTab('database')} />
           <NavItem icon={<FileText />} label="File Logs" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
           <NavItem icon={<Shield />} label="Admin" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />
+          <NavItem icon={<Brain />} label="Skills" active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
           <NavItem icon={<Link />} label="Integrations" active={activeTab === 'integrations'} onClick={() => setActiveTab('integrations')} />
           <NavItem icon={<Settings />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>
@@ -218,6 +323,7 @@ function AppContent() {
         {activeTab === 'database' && <FileDatabaseView user={user} />}
         {activeTab === 'logs' && <FileLogsView user={user} />}
         {activeTab === 'admin' && <AdminView user={user} />}
+        {activeTab === 'skills' && <SkillsView user={user} />}
         {activeTab === 'integrations' && <IntegrationsView user={user} />}
         {activeTab === 'settings' && <SettingsView user={user} />}
       </div>
@@ -245,17 +351,39 @@ function ChatView({ user }: { user: User }) {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [useMemory, setUseMemory] = useState(false);
   const [attachment, setAttachment] = useState<{data: string, mimeType: string, name: string} | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [skills, setSkills] = useState({
+    webSearch: false,
+    marketResearch: false,
+    dataAnalysis: false,
+    gmailIntegration: false,
+    calendarManagement: false
+  });
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const q = query(collection(db, 'messages'), where('userId', '==', user.uid), orderBy('timestamp', 'asc'));
+    const fetchSkills = async () => {
+      const docRef = doc(db, 'user_skills', user.uid);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        setSkills(snap.data() as any);
+      }
+    };
+    fetchSkills();
+  }, [user.uid]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'messages'), where('userId', '==', user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      msgs.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      setMessages(msgs);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     });
     return () => unsubscribe();
@@ -270,6 +398,68 @@ function ChatView({ user }: { user: User }) {
       setAttachment({ data: base64, mimeType: file.type, name: file.name });
     };
     reader.readAsDataURL(file);
+  };
+
+  const extractTextFromFile = async (file: File): Promise<string | null> => {
+    try {
+      const name = file.name.toLowerCase();
+      if (name.endsWith('.pdf')) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let text = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          text += content.items.map((item: any) => item.str).join(' ') + '\n';
+        }
+        return text;
+      } else if (name.endsWith('.docx')) {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        return result.value;
+      } else if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = xlsx.read(arrayBuffer, { type: 'array' });
+        let text = '';
+        workbook.SheetNames.forEach(sheetName => {
+          const sheet = workbook.Sheets[sheetName];
+          text += xlsx.utils.sheet_to_csv(sheet) + '\n';
+        });
+        return text;
+      } else if (file.type.startsWith('text/') || name.match(/\.(js|ts|jsx|tsx|json|md|txt|html|css|py|java|c|cpp|h|hpp|go|rs|rb|php)$/)) {
+        return await file.text();
+      }
+    } catch (err) {
+      console.error(`Error extracting text from ${file.name}:`, err);
+    }
+    return null;
+  };
+
+  const handleFolderChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    
+    let combinedText = `Folder contents (${files.length} files):\n\n`;
+    let count = 0;
+    
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (file.size > 5 * 1024 * 1024) continue; // Skip files > 5MB
+      
+      const text = await extractTextFromFile(file);
+      if (text) {
+        combinedText += `--- ${file.webkitRelativePath || file.name} ---\n${text}\n\n`;
+        count++;
+        if (count >= 30) break; // Limit to 30 files
+      }
+    }
+    
+    const base64 = btoa(unescape(encodeURIComponent(combinedText)));
+    setAttachment({ 
+      data: base64, 
+      mimeType: 'text/plain', 
+      name: `Folder: ${files[0].webkitRelativePath?.split('/')[0] || 'Selected Folder'} (${count} files)` 
+    });
   };
 
   const startRecording = async () => {
@@ -331,7 +521,20 @@ function ChatView({ user }: { user: User }) {
 
     try {
       const parts: any[] = [];
-      if (userText) parts.push({ text: userText });
+      let promptText = userText;
+
+      if (useMemory && window.electronAPI && userText) {
+        const memoryResults = await window.electronAPI.searchMemory(userText);
+        if (memoryResults.success && memoryResults.results.length > 0) {
+          promptText += `\n\n--- RELEVANT CONTEXT FROM MY FILES ---\n`;
+          memoryResults.results.forEach((r: any) => {
+            promptText += `[File: ${r.fileName}]\n${r.text}\n\n`;
+          });
+          promptText += `--- END CONTEXT ---\nPlease use the above context to answer my question.`;
+        }
+      }
+
+      if (promptText) parts.push({ text: promptText });
       if (currentAttachment) {
         parts.push({
           inlineData: {
@@ -354,15 +557,98 @@ function ChatView({ user }: { user: User }) {
         }
       };
 
+      const copyFileFunction: FunctionDeclaration = {
+        name: "copyFile",
+        description: "Copy a file from a source path to a destination path.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            source: { type: Type.STRING, description: "The absolute path of the source file." },
+            destination: { type: Type.STRING, description: "The absolute path of the destination file." }
+          },
+          required: ["source", "destination"]
+        }
+      };
+
+      const deleteFileFunction: FunctionDeclaration = {
+        name: "deleteFile",
+        description: "Delete a file at the given path.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            path: { type: Type.STRING, description: "The absolute path of the file to delete." }
+          },
+          required: ["path"]
+        }
+      };
+
+      const moveFileFunction: FunctionDeclaration = {
+        name: "moveFile",
+        description: "Move or rename a file from a source path to a destination path. Use this to cut/move files.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            source: { type: Type.STRING, description: "The absolute path of the source file." },
+            destination: { type: Type.STRING, description: "The absolute path of the destination file." }
+          },
+          required: ["source", "destination"]
+        }
+      };
+
+      const generateMarketReportFunction: FunctionDeclaration = {
+        name: "generateMarketReport",
+        description: "Generate a comprehensive market research report. Use this when the user asks for market research, industry analysis, or a detailed report on a topic.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            topic: { type: Type.STRING, description: "The topic of the market research." },
+            keyFindings: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Key findings to include in the report." }
+          },
+          required: ["topic", "keyFindings"]
+        }
+      };
+
+      const analyzeDataFunction: FunctionDeclaration = {
+        name: "analyzeData",
+        description: "Perform deep data analysis on a provided dataset. Use this when the user asks to slice, dice, pivot, or analyze data.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            analysisGoal: { type: Type.STRING, description: "What the user wants to find out from the data." },
+            insights: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Key insights derived from the data." }
+          },
+          required: ["analysisGoal", "insights"]
+        }
+      };
+
+      const functionDeclarations = [saveFileFunction, copyFileFunction, deleteFileFunction, moveFileFunction];
+      if (skills.marketResearch) functionDeclarations.push(generateMarketReportFunction);
+      if (skills.dataAnalysis) functionDeclarations.push(analyzeDataFunction);
+
+      const tools: any[] = [{ functionDeclarations }];
+      if (skills.webSearch || skills.marketResearch) {
+        tools.push({ googleSearch: {} });
+      }
+
+      let systemInstruction = `You are the world's best secretary with 40 years of experience. You are highly professional, incredibly organized, proactive, and polite. You anticipate needs and handle tasks with utmost efficiency. The user's ID is ${user.uid}. 
+          If they ask you to create a task, say "I will create a task for that".
+          If they ask to open a file or bookmark, say "I will queue a desktop command for that".
+          If they share a file and ask you to store/save it, use the saveFile tool.
+          If they ask you to copy, move, cut, or delete a file, use the copyFile, moveFile, or deleteFile tools.`;
+
+      if (skills.marketResearch) {
+        systemInstruction += `\nMarket Research Skill ENABLED: You have a dedicated sub-agent for market research. When asked to research a topic, use the googleSearch tool to gather information, then use the generateMarketReport tool to compile a professional report.`;
+      }
+      if (skills.dataAnalysis) {
+        systemInstruction += `\nData Analysis Skill ENABLED: You have a dedicated sub-agent for data analysis. When asked to analyze data, slice and dice the provided information and use the analyzeData tool to present deep insights.`;
+      }
+
       const response = await ai.models.generateContent({
         model: 'gemini-3.1-pro-preview',
         contents: { parts },
         config: {
-          systemInstruction: `You are an executive assistant. The user's ID is ${user.uid}. 
-          If they ask you to create a task, say "I will create a task for that".
-          If they ask to open a file or bookmark, say "I will queue a desktop command for that".
-          If they share a file and ask you to store/save it, use the saveFile tool.`,
-          tools: [{ functionDeclarations: [saveFileFunction] }]
+          systemInstruction,
+          tools
         }
       });
 
@@ -384,6 +670,59 @@ function ChatView({ user }: { user: User }) {
             } else {
               reply += `\n\n(No file was attached to save.)`;
             }
+          } else if (call.name === 'copyFile') {
+            if (window.electronAPI) {
+              const args = call.args as any;
+              const result = await window.electronAPI.copyFile(args.source, args.destination);
+              if (result.success) {
+                reply += `\n\nI have copied the file from ${args.source} to ${args.destination}.`;
+              } else {
+                reply += `\n\nFailed to copy file: ${result.error}`;
+              }
+            } else {
+              reply += `\n\n(Cannot copy file: Desktop mode is not active.)`;
+            }
+          } else if (call.name === 'moveFile') {
+            if (window.electronAPI) {
+              const args = call.args as any;
+              const result = await window.electronAPI.moveFile(args.source, args.destination);
+              if (result.success) {
+                reply += `\n\nI have moved the file from ${args.source} to ${args.destination}.`;
+              } else {
+                reply += `\n\nFailed to move file: ${result.error}`;
+              }
+            } else {
+              reply += `\n\n(Cannot move file: Desktop mode is not active.)`;
+            }
+          } else if (call.name === 'deleteFile') {
+            if (window.electronAPI) {
+              const args = call.args as any;
+              const result = await window.electronAPI.deleteFile(args.path);
+              if (result.success) {
+                reply += `\n\nI have deleted the file at ${args.path}.`;
+              } else {
+                reply += `\n\nFailed to delete file: ${result.error}`;
+              }
+            } else {
+              reply += `\n\n(Cannot delete file: Desktop mode is not active.)`;
+            }
+          } else if (call.name === 'generateMarketReport') {
+            const args = call.args as any;
+            const reportContent = `# Market Research Report: ${args.topic}\n\n## Key Findings\n${args.keyFindings.map((f: string) => `- ${f}`).join('\n')}\n\n*Generated by your Executive Secretary's Market Research Sub-Agent.*`;
+            
+            if (window.electronAPI) {
+              const result = await window.electronAPI.saveFile(`${args.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_report.md`, btoa(unescape(encodeURIComponent(reportContent))), 'Documents');
+              if (result.success) {
+                reply += `\n\nI have generated the market research report on "${args.topic}" and saved it to ${result.path}.`;
+              } else {
+                reply += `\n\nI generated the market research report on "${args.topic}", but failed to save it locally: ${result.error}\n\nHere is the report:\n\n${reportContent}`;
+              }
+            } else {
+              reply += `\n\nI have generated the market research report on "${args.topic}":\n\n${reportContent}`;
+            }
+          } else if (call.name === 'analyzeData') {
+            const args = call.args as any;
+            reply += `\n\n📊 **Data Analysis: ${args.analysisGoal}**\n\n**Key Insights:**\n${args.insights.map((i: string) => `- ${i}`).join('\n')}`;
           }
         }
       }
@@ -501,6 +840,15 @@ function ChatView({ user }: { user: User }) {
             onChange={handleFileChange} 
             className="hidden" 
           />
+          <input 
+            type="file" 
+            ref={folderInputRef} 
+            onChange={handleFolderChange} 
+            // @ts-ignore
+            webkitdirectory=""
+            directory=""
+            className="hidden" 
+          />
           <button 
             onClick={() => fileInputRef.current?.click()}
             className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-xl transition-colors"
@@ -509,11 +857,25 @@ function ChatView({ user }: { user: User }) {
             <Paperclip className="w-5 h-5" />
           </button>
           <button 
+            onClick={() => folderInputRef.current?.click()}
+            className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-xl transition-colors"
+            title="Attach folder"
+          >
+            <FolderOpen className="w-5 h-5" />
+          </button>
+          <button 
             onClick={isRecording ? stopRecording : startRecording}
             className={`p-3 rounded-xl transition-colors ${isRecording ? 'bg-red-500/20 text-red-500 hover:bg-red-500/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
             title={isRecording ? "Stop recording" : "Record voice note"}
           >
             {isRecording ? <StopCircle className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+          </button>
+          <button 
+            onClick={() => setUseMemory(!useMemory)}
+            className={`p-3 rounded-xl transition-colors ${useMemory ? 'bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
+            title={useMemory ? "Memory Search Active" : "Search Memory"}
+          >
+            <Database className="w-5 h-5" />
           </button>
           <input
             type="text"
@@ -542,9 +904,11 @@ function TasksView({ user }: { user: User }) {
   const [newTask, setNewTask] = useState('');
 
   useEffect(() => {
-    const q = query(collection(db, 'tasks'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'tasks'), where('userId', '==', user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setTasks(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const tsks = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      tsks.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setTasks(tsks);
     });
     return () => unsubscribe();
   }, [user.uid]);
@@ -620,9 +984,11 @@ function DesktopView({ user }: { user: User }) {
 
   useEffect(() => {
     if (isDesktop) return; // Don't sync from Firestore if running locally
-    const q = query(collection(db, 'desktop_commands'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'desktop_commands'), where('userId', '==', user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setCommands(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const cmds = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      cmds.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setCommands(cmds);
     });
     return () => unsubscribe();
   }, [user.uid, isDesktop]);
@@ -965,6 +1331,22 @@ function FileDatabaseView({ user }: { user: User }) {
     }
   };
 
+  const handleIngest = async () => {
+    if (!isDesktop) return;
+    const folder = await window.electronAPI!.selectFolder();
+    if (!folder) return;
+
+    setIsScanning(true);
+    const result = await window.electronAPI!.ingestFolder(folder);
+    setIsScanning(false);
+
+    if (result.success) {
+      alert(`Successfully ingested ${result.chunks} chunks into memory!`);
+    } else {
+      alert('Ingest failed: ' + result.error);
+    }
+  };
+
   const handleOpenFile = async (path: string) => {
     if (isDesktop) {
       await window.electronAPI!.openFile(path);
@@ -982,7 +1364,8 @@ function FileDatabaseView({ user }: { user: User }) {
       <div className="flex flex-col h-full items-center justify-center p-6 text-center">
         <Database className="w-12 h-12 text-slate-700 mb-4" />
         <h2 className="text-xl font-semibold mb-2">Desktop Only Feature</h2>
-        <p className="text-slate-500 max-w-md">The local file database is only available when running the native Electron desktop application.</p>
+        <p className="text-slate-500 max-w-md">The local file database and "Ingest to Memory" features are only available when running the native Electron desktop application.</p>
+        <p className="text-slate-500 max-w-md mt-4 text-sm">To use these features, please download and run the desktop app locally.</p>
       </div>
     );
   }
@@ -999,14 +1382,24 @@ function FileDatabaseView({ user }: { user: User }) {
           <h2 className="text-xl font-semibold">Local File Database</h2>
           <p className="text-sm text-slate-500">Scan folders to index and search your local files</p>
         </div>
-        <button 
-          onClick={handleScan} 
-          disabled={isScanning}
-          className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2"
-        >
-          {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
-          {isScanning ? 'Scanning...' : 'Scan New Folder'}
-        </button>
+        <div className="flex gap-3">
+          <button 
+            onClick={handleIngest} 
+            disabled={isScanning}
+            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2"
+          >
+            {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
+            {isScanning ? 'Ingesting...' : 'Ingest to Memory'}
+          </button>
+          <button 
+            onClick={handleScan} 
+            disabled={isScanning}
+            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2"
+          >
+            {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
+            {isScanning ? 'Scanning...' : 'Scan New Folder'}
+          </button>
+        </div>
       </div>
       
       <div className="p-6 border-b border-slate-800/50 bg-slate-900/10">
@@ -1129,6 +1522,104 @@ function AdminView({ user }: { user: User }) {
             <div className="text-center text-slate-500 py-10">No folders have been granted access yet.</div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SkillsView({ user }: { user: User }) {
+  const [skills, setSkills] = useState({
+    webSearch: false,
+    marketResearch: false,
+    dataAnalysis: false,
+    gmailIntegration: false,
+    calendarManagement: false
+  });
+  const [saving, setSaving] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchSkills = async () => {
+      const docRef = doc(db, 'user_skills', user.uid);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        setSkills(snap.data() as any);
+      }
+    };
+    fetchSkills();
+  }, [user.uid]);
+
+  const toggleSkill = async (skill: keyof typeof skills) => {
+    setSaving(skill);
+    const newSkills = { ...skills, [skill]: !skills[skill] };
+    setSkills(newSkills);
+    
+    await setDoc(doc(db, 'user_skills', user.uid), {
+      [skill]: newSkills[skill],
+      userId: user.uid
+    }, { merge: true });
+    
+    setTimeout(() => setSaving(null), 500);
+  };
+
+  const SkillCard = ({ id, title, description, icon: Icon }: { id: keyof typeof skills, title: string, description: string, icon: any }) => (
+    <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 flex items-start justify-between">
+      <div className="flex items-start gap-4">
+        <div className={`p-3 rounded-lg ${skills[id] ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-700 text-slate-400'}`}>
+          <Icon className="w-6 h-6" />
+        </div>
+        <div>
+          <h3 className="text-lg font-medium text-white mb-1">{title}</h3>
+          <p className="text-sm text-slate-400 max-w-md">{description}</p>
+        </div>
+      </div>
+      <button
+        onClick={() => toggleSkill(id)}
+        disabled={saving === id}
+        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${skills[id] ? 'bg-indigo-500' : 'bg-slate-600'}`}
+      >
+        <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${skills[id] ? 'translate-x-6' : 'translate-x-1'}`} />
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto h-full overflow-y-auto">
+      <div className="mb-8">
+        <h2 className="text-2xl font-bold text-white mb-2">Agent Skills</h2>
+        <p className="text-slate-400">Enable specialized sub-agents and capabilities for your assistant.</p>
+      </div>
+
+      <div className="space-y-4">
+        <SkillCard 
+          id="webSearch" 
+          title="Web Search & Browsing" 
+          description="Allows the assistant to search the internet for real-time information and summarize web pages."
+          icon={Search}
+        />
+        <SkillCard 
+          id="marketResearch" 
+          title="Market Research & Reporting" 
+          description="Spawns a dedicated sub-agent to perform deep market research and generate comprehensive PDF/Markdown reports."
+          icon={FileText}
+        />
+        <SkillCard 
+          id="dataAnalysis" 
+          title="Data Analysis (Slicing & Dicing)" 
+          description="Enables advanced data processing capabilities for CSVs and Excel files, including pivoting, filtering, and statistical analysis."
+          icon={Database}
+        />
+        <SkillCard 
+          id="gmailIntegration" 
+          title="Gmail Integration" 
+          description="Connects to your Gmail to draft responses, summarize threads, and manage your inbox automatically."
+          icon={Send}
+        />
+        <SkillCard 
+          id="calendarManagement" 
+          title="Calendar Management" 
+          description="Allows the assistant to schedule meetings, resolve conflicts, and manage your daily agenda."
+          icon={CheckSquare}
+        />
       </div>
     </div>
   );

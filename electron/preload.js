@@ -12,4 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPermissions: () => ipcRenderer.invoke('desktop:get-permissions'),
   removePermission: (folderPath) => ipcRenderer.invoke('desktop:remove-permission', folderPath),
   saveFile: (name, data, folder) => ipcRenderer.invoke('desktop:save-file', { name, data, folder }),
+  ingestFolder: (folderPath) => ipcRenderer.invoke('desktop:ingest-folder', folderPath),
+  searchMemory: (query) => ipcRenderer.invoke('desktop:search-memory', query),
+  copyFile: (source, dest) => ipcRenderer.invoke('desktop:copy-file', source, dest),
+  deleteFile: (filePath) => ipcRenderer.invoke('desktop:delete-file', filePath),
 });

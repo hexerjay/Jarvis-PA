@@ -134,11 +134,28 @@ service cloud.firestore {
              data.userId is string && data.userId.size() > 0;
     }
 
+    function isValidUserSkills(data) {
+      return data.keys().hasOnly(['userId', 'webSearch', 'marketResearch', 'dataAnalysis', 'gmailIntegration', 'calendarManagement']) &&
+             data.userId is string && data.userId.size() > 0 &&
+             (!('webSearch' in data) || data.webSearch is bool) &&
+             (!('marketResearch' in data) || data.marketResearch is bool) &&
+             (!('dataAnalysis' in data) || data.dataAnalysis is bool) &&
+             (!('gmailIntegration' in data) || data.gmailIntegration is bool) &&
+             (!('calendarManagement' in data) || data.calendarManagement is bool);
+    }
+
     // Rules
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create: if isAuthenticated() && isValidUser(request.resource.data) && ((isOwner(userId) && request.resource.data.role == 'user') || isAdmin());
       allow update: if isAuthenticated() && isValidUser(request.resource.data) && ((isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /user_skills/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isValidUserSkills(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidUserSkills(request.resource.data) && (isOwner(userId) || isAdmin());
       allow delete: if isAdmin();
     }
 
